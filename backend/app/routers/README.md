@@ -1,0 +1,1 @@
+Endpoints are implemented in app/main.py for the MVP to keep setup simple. Split into router modules after the prototype works.

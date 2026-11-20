@@ -1,0 +1,116 @@
+[
+  {
+    "inputs": [],
+    "stateMutability": "nonpayable",
+    "type": "constructor"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {"indexed": true, "internalType": "uint256", "name": "ticketId", "type": "uint256"},
+      {"indexed": true, "internalType": "uint256", "name": "eventId", "type": "uint256"},
+      {"indexed": true, "internalType": "address", "name": "owner", "type": "address"},
+      {"indexed": false, "internalType": "uint256", "name": "facePrice", "type": "uint256"}
+    ],
+    "name": "TicketIssued",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {"indexed": true, "internalType": "uint256", "name": "ticketId", "type": "uint256"},
+      {"indexed": true, "internalType": "address", "name": "from", "type": "address"},
+      {"indexed": true, "internalType": "address", "name": "to", "type": "address"},
+      {"indexed": false, "internalType": "uint256", "name": "price", "type": "uint256"}
+    ],
+    "name": "TicketTransferred",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {"indexed": true, "internalType": "uint256", "name": "ticketId", "type": "uint256"},
+      {"indexed": false, "internalType": "address", "name": "redeemedBy", "type": "address"}
+    ],
+    "name": "TicketRedeemed",
+    "type": "event"
+  },
+  {
+    "inputs": [
+      {"internalType": "uint256", "name": "eventId", "type": "uint256"},
+      {"internalType": "address", "name": "buyer", "type": "address"},
+      {"internalType": "uint256", "name": "facePrice", "type": "uint256"}
+    ],
+    "name": "issueTicket",
+    "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {"internalType": "uint256", "name": "ticketId", "type": "uint256"},
+      {"internalType": "address", "name": "buyer", "type": "address"},
+      {"internalType": "uint256", "name": "price", "type": "uint256"}
+    ],
+    "name": "resell",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [{"internalType": "uint256", "name": "ticketId", "type": "uint256"}],
+    "name": "redeem",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [{"internalType": "uint256", "name": "ticketId", "type": "uint256"}],
+    "name": "getTicket",
+    "outputs": [
+      {"internalType": "uint256", "name": "eventId", "type": "uint256"},
+      {"internalType": "address", "name": "owner", "type": "address"},
+      {"internalType": "uint256", "name": "facePrice", "type": "uint256"},
+      {"internalType": "uint256", "name": "maxResalePrice", "type": "uint256"},
+      {"internalType": "bool", "name": "redeemed", "type": "bool"},
+      {"internalType": "uint256", "name": "issuedAt", "type": "uint256"}
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [{"internalType": "uint256", "name": "ticketId", "type": "uint256"}],
+    "name": "isRedeemed",
+    "outputs": [{"internalType": "bool", "name": "", "type": "bool"}],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "name",
+    "outputs": [{"internalType": "string", "name": "", "type": "string"}],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "symbol",
+    "outputs": [{"internalType": "string", "name": "", "type": "string"}],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "organizer",
+    "outputs": [{"internalType": "address", "name": "", "type": "address"}],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "nextTicketId",
+    "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+    "stateMutability": "view",
+    "type": "function"
+  }
+]
