@@ -16,10 +16,32 @@ export default function MyTickets({
 }) {
   const [activeTab, setActiveTab] = useState('ACTIVE'); // ACTIVE, SHARED, RESOLD
   const [selectedTicketModal, setSelectedTicketModal] = useState(null);
+  const [syncingQuaiId, setSyncingQuaiId] = useState(null);
+  const [quaiMsg, setQuaiMsg] = useState('');
 
   const activeTickets = tickets.filter(t => t.status === 'ACTIVE' && !t.redeemed);
   const redeemedTickets = tickets.filter(t => t.redeemed || t.status === 'REDEEMED');
   const resoldTickets = tickets.filter(t => t.status === 'RESOLD');
+
+  async function handleSyncToQuai(ticketId) {
+    setSyncingQuaiId(ticketId);
+    setQuaiMsg('');
+    try {
+      const res = await fetch('/api/quai/sync-ticket', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ticket_id: ticketId })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Failed to sync with Quai Network');
+      setQuaiMsg(`Ticket #${ticketId} synced to Quai Network! Tx: ${data.quai_tx_hash.substring(0, 16)}...`);
+      if (onRefresh) onRefresh();
+    } catch (err) {
+      setQuaiMsg(`Quai sync error: ${err.message}`);
+    } finally {
+      setSyncingQuaiId(null);
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -154,6 +176,38 @@ export default function MyTickets({
                           <span className="font-semibold text-brand-300">₹{t.max_resale_price.toLocaleString('en-IN')}</span>
                         </div>
                       </div>
+
+                      {/* Quai Network Sync Status */}
+                      {t.quai_status === 'CONFIRMED' ? (
+                        <div className="p-2.5 rounded-xl bg-purple-950/40 border border-purple-600/40 flex items-center justify-between text-xs">
+                          <div className="flex items-center gap-1.5 truncate">
+                            <span className="w-2 h-2 rounded-full bg-purple-400 shrink-0" />
+                            <span className="text-purple-200 font-semibold text-[11px]">Quai Cyprus-1 Confirmed</span>
+                          </div>
+                          {t.quai_tx_hash && (
+                            <a
+                              href={`https://orchard.quaiscan.io/tx/${t.quai_tx_hash}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-[10px] text-purple-300 hover:text-white flex items-center gap-1 font-mono shrink-0 ml-1"
+                            >
+                              <span>QuaiScan</span>
+                              <ExternalLink className="w-3 h-3" />
+                            </a>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800 flex items-center justify-between text-xs">
+                          <span className="text-[11px] text-slate-400">Quai: Not Synced</span>
+                          <button
+                            onClick={() => handleSyncToQuai(t.id)}
+                            disabled={syncingQuaiId === t.id}
+                            className="px-2.5 py-1 rounded-lg bg-purple-900/60 hover:bg-purple-800 border border-purple-700 text-purple-200 text-[10px] font-semibold transition-colors"
+                          >
+                            {syncingQuaiId === t.id ? 'Syncing...' : 'Sync to Quai'}
+                          </button>
+                        </div>
+                      )}
 
                       {/* Sharing Status if currently shared */}
                       {isShared && (
@@ -352,6 +406,31 @@ export default function MyTickets({
                   <span className="font-semibold text-brand-300">₹{selectedTicketModal.max_resale_price}</span>
                 </div>
               </div>
+
+              {selectedTicketModal.quai_status === 'CONFIRMED' && (
+                <div className="p-3 rounded-xl bg-purple-950/40 border border-purple-600/40 space-y-1.5 text-xs">
+                  <div className="flex items-center justify-between text-purple-200 font-semibold text-[11px]">
+                    <span>Quai Network Proof (Cyprus-1)</span>
+                    <span className="px-1.5 py-0.5 rounded bg-purple-900/60 text-[10px] text-purple-300">CONFIRMED</span>
+                  </div>
+                  {selectedTicketModal.quai_record?.ticket_hash && (
+                    <div className="text-[10px] font-mono text-slate-400 truncate">
+                      Hash: {selectedTicketModal.quai_record.ticket_hash}
+                    </div>
+                  )}
+                  {selectedTicketModal.quai_tx_hash && (
+                    <a
+                      href={`https://orchard.quaiscan.io/tx/${selectedTicketModal.quai_tx_hash}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[10px] text-purple-400 hover:text-white flex items-center gap-1 font-mono pt-1"
+                    >
+                      <span>View On QuaiScan Explorer</span>
+                      <ExternalLink className="w-3 h-3" />
+                    </a>
+                  )}
+                </div>
+              )}
 
               <button
                 onClick={() => setSelectedTicketModal(null)}

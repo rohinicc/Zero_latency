@@ -8,12 +8,19 @@ import secrets
 import base64
 import io
 import qrcode
+import logging
 
-from .database import Base, engine, get_db
+from .database import Base, engine, get_db, upgrade_schema
 from . import models, schemas
-from .services import security_service
+from .services import security_service, risk_engine, queue_service, booking_service, quai_service
+import json
 
-# Create tables
+from dataclasses import asdict
+
+logger = logging.getLogger("fairpass")
+
+# Ensure tables and upgrades
+upgrade_schema()
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
@@ -58,6 +65,20 @@ def serialize_ticket(t: models.Ticket, db: Session) -> dict:
             'created_at': active_share.created_at.isoformat()
         }
     
+    # Check Quai Network record
+    quai_rec = db.query(models.QuaiTicketRecord).filter_by(ticket_id=t.id).first()
+    quai_info = None
+    if quai_rec:
+        quai_info = {
+            'ticket_hash': quai_rec.ticket_hash,
+            'quai_tx_hash': quai_rec.quai_tx_hash,
+            'contract_address': quai_rec.contract_address,
+            'zone': quai_rec.zone,
+            'status': quai_rec.status,
+            'on_chain_redeemed': quai_rec.on_chain_redeemed,
+            'confirmed_at': quai_rec.confirmed_at.isoformat() if quai_rec.confirmed_at else None
+        }
+
     return {
         'id': t.id,
         'event_id': t.event_id,
@@ -73,6 +94,9 @@ def serialize_ticket(t: models.Ticket, db: Session) -> dict:
         'redeemed_at': t.redeemed_at.isoformat() if t.redeemed_at else None,
         'blockchain_tx': t.blockchain_tx,
         'blockchain_token_id': t.blockchain_token_id,
+        'quai_status': t.quai_status or (quai_rec.status if quai_rec else 'NOT_SYNCED'),
+        'quai_tx_hash': t.quai_tx_hash or (quai_rec.quai_tx_hash if quai_rec else None),
+        'quai_record': quai_info,
         'created_at': t.created_at.isoformat() if t.created_at else None,
         'active_share': share_info
     }
@@ -505,28 +529,49 @@ def event_stats(event_id: int, db: Session = Depends(get_db)):
 @app.post('/api/events/{event_id}/access-check')
 def access_check(event_id: int, data: schemas.AccessCheckRequest, request: Request, db: Session = Depends(get_db)):
     """
-    Evaluates client interaction timing, rolling attempt rate, and enforces the 50-request lockout threshold.
+    Evaluates client interaction timing, behavioral signals, and enforces configurable risk scoring.
     """
     e = db.query(models.Event).filter_by(id=event_id).first()
     if not e:
         raise HTTPException(404, 'Event not found')
     
     client_ip = request.client.host if request.client else '127.0.0.1'
-    result = security_service.evaluate_access(
+    result = risk_engine.evaluate_behavioral_risk(
         db=db,
         event_id=event_id,
-        email=data.email,
-        ip=client_ip,
+        identifier=data.email,
+        ip_address=client_ip,
         duration_ms=data.duration_ms,
         session_id=data.session_id or ''
     )
+
+    # Populate convenient aliases for frontend & test assertions
+    result["classification"] = result.get("risk_classification", "LOW")
+    result["signals"] = result.get("triggered_signals", [])
+
+    # If granted and queue is not enabled for this event, issue queue auth token directly
+    if result.get("status") == "GRANTED" and not e.queue_enabled:
+        auth_info = queue_service.issue_queue_authorization(
+            db=db,
+            event_id=event_id,
+            email=data.email,
+            session_id=data.session_id or "",
+            max_quantity=e.max_per_user
+        )
+        result["queue_auth_token"] = auth_info["token"]
+        result["token_expires_at"] = auth_info["expires_at"]
+
     return result
 
 @app.post('/api/events/{event_id}/challenge-verify')
 def challenge_verify(event_id: int, data: schemas.ChallengeVerifyRequest, db: Session = Depends(get_db)):
     """
-    Verifies human math/puzzle challenge response.
+    Verifies human math/puzzle challenge response and issues queue authorization if queue is disabled.
     """
+    e = db.query(models.Event).filter_by(id=event_id).first()
+    if not e:
+        raise HTTPException(404, 'Event not found')
+
     try:
         parts = data.challenge_token.split(':')
         token_hash = parts[0]
@@ -556,10 +601,23 @@ def challenge_verify(event_id: int, data: schemas.ChallengeVerifyRequest, db: Se
         db.add(log)
         db.commit()
 
-        return {
+        resp = {
             'status': 'GRANTED',
             'message': 'Challenge solved successfully. Access granted to booking portal.'
         }
+
+        # If queue not enabled, issue token directly
+        if not e.queue_enabled:
+            auth_info = queue_service.issue_queue_authorization(
+                db=db,
+                event_id=event_id,
+                email=data.email,
+                max_quantity=e.max_per_user
+            )
+            resp["queue_auth_token"] = auth_info["token"]
+            resp["token_expires_at"] = auth_info["expires_at"]
+
+        return resp
     except ValueError:
         raise HTTPException(400, 'Invalid solution format')
 
@@ -722,12 +780,33 @@ def queue_status(event_id: int, email: str, db: Session = Depends(get_db)):
 
 @app.post('/api/events/{event_id}/queue/admit')
 def queue_admit(event_id: int, email: str, db: Session = Depends(get_db)):
-    """Promotes user from queue to admitted for booking."""
-    q = db.query(models.QueueEntry).filter_by(event_id=event_id, email=email).first()
+    """Promotes user from queue to admitted for booking and issues secure queue authorization token."""
+    e = db.query(models.Event).filter_by(id=event_id).first()
+    if not e:
+        raise HTTPException(404, 'Event not found')
+    
+    clean_email = email.strip().lower()
+    q = db.query(models.QueueEntry).filter_by(event_id=event_id, email=clean_email).first()
+    session_id = q.session_id if q else secrets.token_hex(8)
     if q:
         q.status = 'ADMITTED'
         db.commit()
-    return {'status': 'ADMITTED', 'message': 'You have reached the front of the queue! Proceed to ticket booking.'}
+
+    auth_info = queue_service.issue_queue_authorization(
+        db=db,
+        event_id=event_id,
+        email=clean_email,
+        session_id=session_id,
+        max_quantity=e.max_per_user
+    )
+
+    return {
+        'status': 'ADMITTED',
+        'message': 'You have reached the front of the queue! Proceed to ticket booking.',
+        'queue_auth_token': auth_info['token'],
+        'expires_at': auth_info['expires_at'],
+        'max_quantity': auth_info['max_quantity']
+    }
 
 # -----------------
 # 5. Demo Payment Gateway
@@ -788,140 +867,53 @@ def process_payment(data: schemas.DemoPaymentProcessRequest, db: Session = Depen
     }
 
 # -----------------
-# 6. Ticket Booking
+# 6. Ticket Booking (Atomic & Cryptographically Secured)
 # -----------------
 @app.post('/api/book')
 def book_tickets(data: schemas.BookingRequest, db: Session = Depends(get_db)):
-    e = db.query(models.Event).filter_by(id=data.event_id).first()
-    if not e:
-        raise HTTPException(404, 'Event not found')
-    
-    # 1. Check user restriction
-    active_restriction = security_service.check_active_restriction(db, data.email.strip().lower())
-    if active_restriction:
-        raise HTTPException(403, f"Booking blocked: Account is temporarily restricted ({active_restriction.reason})")
-    
-    # 2. Validate quantity
-    if data.quantity < 1:
-        raise HTTPException(400, 'Quantity must be at least 1')
-    if data.quantity > e.max_per_user:
-        raise HTTPException(400, f"Cannot book more than {e.max_per_user} tickets in a single transaction")
-    
-    # 3. Check existing active tickets for user (Max tickets per user rule)
-    existing_count = db.query(models.Ticket).filter(
-        models.Ticket.event_id == e.id,
-        models.Ticket.owner_email == data.email,
-        models.Ticket.status == 'ACTIVE'
-    ).count()
-
-    if existing_count + data.quantity > e.max_per_user:
-        raise HTTPException(
-            400,
-            f"FairPass Ticket Limit: Maximum {e.max_per_user} active tickets per user for this event. You already hold {existing_count}."
-        )
-
-    # 4. Check available tickets
-    if e.sold + data.quantity > e.quantity:
-        raise HTTPException(400, f"Sold out! Only {max(0, e.quantity - e.sold)} tickets remain.")
-
-    # 5. Handle payment simulation
-    total_amount = round(e.price * data.quantity, 2)
-    now = datetime.utcnow()
-    tx_ref = f"TXN-DEMO-{now.strftime('%Y%m%d')}-{secrets.token_hex(4).upper()}"
-
-    if data.simulate_failure:
-        # Record failed payment and abort
-        p = models.Payment(
-            tx_ref=tx_ref,
-            user_email=data.email,
-            user_name=data.name,
-            event_id=e.id,
-            amount=total_amount,
-            payment_method=data.payment_method,
-            payment_type='PRIMARY_PURCHASE',
-            status='FAILED',
-            failure_reason='Simulated card/UPI failure during checkout test.',
-            timestamp=now
-        )
-        db.add(p)
-        db.commit()
-        raise HTTPException(402, 'Simulated payment failed. No tickets were issued.')
-
-    # Payment succeeded -> issue payment record
-    p = models.Payment(
-        tx_ref=tx_ref,
-        user_email=data.email,
-        user_name=data.name,
-        event_id=e.id,
-        amount=total_amount,
+    """
+    Atomic ticket booking with:
+    - Queue authorization token validation (prevents direct API bypass)
+    - Concurrency-safe atomic inventory decrement (prevents oversell)
+    - Anti-scalp per-user limit enforcement
+    - Payment verification before ticket issuance
+    - Rollback on failure
+    - Privacy-preserving Quai Network synchronization
+    """
+    result = booking_service.allocate_tickets_atomic(
+        db=db,
+        event_id=data.event_id,
+        email=data.email,
+        name=data.name,
+        quantity=data.quantity,
         payment_method=data.payment_method,
-        payment_type='PRIMARY_PURCHASE',
-        status='SUCCESS',
-        timestamp=now
+        queue_auth_token=data.queue_auth_token,
+        simulate_failure=data.simulate_failure
     )
-    db.add(p)
 
-    # Issue tickets with secure tokens
-    created_tokens = []
-    issued_tickets = []
-    max_resale = round(e.price * e.resale_cap_multiplier, 2)
+    # Automatically attempt Quai Network sync for each issued ticket
+    for t_data in result.get('tickets', []):
+        try:
+            quai_service.register_ticket_on_quai(
+                db=db,
+                ticket_id=t_data['id'],
+                event_id=data.event_id,
+                owner_email=data.email
+            )
+        except Exception as e:
+            logger.warning(f"Quai sync background attempt for ticket {t_data.get('id')} failed: {e}")
 
-    for i in range(data.quantity):
-        raw_token = f"FP-EV{e.id}-TKT{secrets.token_hex(5).upper()}"
-        secret_hash = secrets.token_hex(16)
-        
-        t = models.Ticket(
-            event_id=e.id,
-            event_name=e.name,
-            owner_email=data.email,
-            owner_name=data.name,
-            face_price=e.price,
-            max_resale_price=max_resale,
-            token=raw_token,
-            secret_hash=secret_hash,
-            status='ACTIVE',
-            redeemed=False,
-            created_at=now
-        )
-        db.add(t)
-        db.flush()  # to obtain t.id
+    # Re-serialize tickets with any Quai info updated
+    refreshed_tickets = []
+    for t_data in result.get('tickets', []):
+        t_obj = db.query(models.Ticket).filter_by(id=t_data['id']).first()
+        if t_obj:
+            refreshed_tickets.append(serialize_ticket(t_obj, db))
+        else:
+            refreshed_tickets.append(t_data)
+    result['tickets'] = refreshed_tickets
 
-        # Record ownership history
-        h = models.TicketOwnershipHistory(
-            ticket_id=t.id,
-            event_id=e.id,
-            from_email='BOX_OFFICE',
-            from_name='FairPass Box Office',
-            to_email=data.email,
-            to_name=data.name,
-            action='INITIAL_PURCHASE',
-            price=e.price,
-            old_token=None,
-            new_token=raw_token,
-            timestamp=now
-        )
-        db.add(h)
-        created_tokens.append(raw_token)
-        issued_tickets.append(t)
-
-    # Update event sold count
-    e.sold += data.quantity
-
-    # If user was in queue, update status
-    q_entry = db.query(models.QueueEntry).filter_by(event_id=e.id, email=data.email).first()
-    if q_entry:
-        q_entry.status = 'COMPLETED'
-
-    db.commit()
-
-    return {
-        'message': f"Booking successful! {data.quantity} ticket(s) issued for {e.name}.",
-        'tx_ref': tx_ref,
-        'quantity': data.quantity,
-        'total_paid': total_amount,
-        'tokens': created_tokens,
-        'tickets': [serialize_ticket(t, db) for t in issued_tickets]
-    }
+    return result
 
 # -----------------
 # 7. Ticket Wallet & Details
@@ -1335,6 +1327,12 @@ def verify_gate(data: schemas.VerifyRequest, db: Session = Depends(get_db)):
         db.add(log)
         db.commit()
 
+        # Quai Network on-chain redemption sync
+        try:
+            quai_service.redeem_ticket_on_quai(db=db, ticket_id=t.id)
+        except Exception as e:
+            logger.warning(f"Quai redemption sync error for ticket {t.id}: {e}")
+
         return {
             'status': 'VALID',
             'badge': 'VALID TICKET — ENTRY APPROVED',
@@ -1395,6 +1393,12 @@ def verify_gate(data: schemas.VerifyRequest, db: Session = Depends(get_db)):
         db.add(log)
         db.commit()
 
+        if t:
+            try:
+                quai_service.redeem_ticket_on_quai(db=db, ticket_id=t.id)
+            except Exception as e:
+                logger.warning(f"Quai redemption sync error for ticket {t.id}: {e}")
+
         return {
             'status': 'VALID',
             'badge': 'VALID GUEST PASS — ENTRY APPROVED',
@@ -1451,3 +1455,115 @@ def record_blockchain_tx(ticket_id: int, tx_hash: str, token_id: Optional[int] =
     db.commit()
 
     return {'message': 'Blockchain transaction recorded successfully', 'ticket_id': t.id, 'tx_hash': tx_hash}
+
+# -----------------
+# 12. Quai Network Integration (Orchard Cyprus-1)
+# -----------------
+@app.get('/api/quai/info')
+def quai_info():
+    """Returns Quai Network configuration, testnet details, and active contract."""
+    return quai_service.get_quai_network_info()
+
+@app.get('/api/quai/rpc-status')
+def quai_rpc_status():
+    """Live probe to verify Quai RPC responsiveness and connectivity."""
+    return quai_service.check_rpc_health()
+
+@app.post('/api/quai/sync-ticket')
+def quai_sync_ticket(data: schemas.QuaiSyncRequest, db: Session = Depends(get_db)):
+    """Synchronizes an issued ticket to Quai Network with zero PII stored on-chain."""
+    t = db.query(models.Ticket).filter_by(id=data.ticket_id).first()
+    if not t:
+        raise HTTPException(404, 'Ticket not found')
+    result = quai_service.register_ticket_on_quai(
+        db=db,
+        ticket_id=t.id,
+        event_id=t.event_id,
+        owner_email=t.owner_email
+    )
+    return result
+
+@app.get('/api/quai/verify-ticket/{ticket_id}')
+def quai_verify_ticket(ticket_id: int, db: Session = Depends(get_db)):
+    """Verifies authenticity and redemption status of a ticket proof on Quai Network."""
+    return quai_service.verify_ticket_on_quai(db=db, ticket_id=ticket_id)
+
+@app.post('/api/quai/redeem-ticket/{ticket_id}')
+def quai_redeem_ticket(ticket_id: int, db: Session = Depends(get_db)):
+    """Marks a ticket proof as redeemed on Quai Network."""
+    return quai_service.redeem_ticket_on_quai(db=db, ticket_id=ticket_id)
+
+# -----------------
+# 13. Behavioral Risk Engine Dashboard & Configuration
+# -----------------
+@app.get('/api/admin/security/risk-assessments')
+def get_risk_assessments(limit: int = 50, db: Session = Depends(get_db)):
+    """Fetches recent behavioral risk assessments for security dashboard visualization."""
+    items = db.query(models.RiskAssessment).order_by(models.RiskAssessment.timestamp.desc()).limit(limit).all()
+    results = []
+    for a in items:
+        try:
+            signals = json.loads(a.triggered_signals) if a.triggered_signals else []
+        except Exception:
+            signals = []
+        classification = a.risk_classification or 'LOW'
+        results.append({
+            'id': a.id,
+            'event_id': a.event_id,
+            'identifier': a.identifier,
+            'session_id': a.session_id,
+            'risk_score': a.risk_score,
+            'risk_classification': classification,
+            'classification': classification,
+            'triggered_signals': signals,
+            'signals': signals,
+            'action_taken': a.action_taken,
+            'timestamp': a.timestamp.isoformat()
+        })
+    return results
+
+def _serialize_weights():
+    w = asdict(risk_engine.DEFAULT_WEIGHTS)
+    w["rapid_submit_weight"] = w.get("rapid_submission_sub300", 0.50)
+    w["burst_request_weight"] = w.get("burst_high", 0.45)
+    w["queue_anomaly_weight"] = w.get("abnormal_queue_attempts", 0.30)
+    w["bypass_attempt_weight"] = w.get("bypass_attempts", 0.50)
+    w["session_anomaly_weight"] = w.get("session_anomaly", 0.30)
+    return w
+
+def _serialize_thresholds():
+    t = asdict(risk_engine.DEFAULT_THRESHOLDS)
+    t["medium"] = t.get("low_cutoff", 0.40)
+    t["high"] = t.get("high_cutoff", 0.75)
+    return t
+
+@app.get('/api/admin/security/risk-weights')
+def get_risk_weights():
+    """Returns active risk evaluation weights and thresholds."""
+    return {
+        'weights': _serialize_weights(),
+        'thresholds': _serialize_thresholds()
+    }
+
+@app.post('/api/admin/security/risk-weights')
+def update_risk_weights(data: schemas.RiskWeightsConfig):
+    """Dynamically updates risk scoring weights and thresholds."""
+    if data.rapid_submit_weight is not None:
+        risk_engine.DEFAULT_WEIGHTS.rapid_submission_sub300 = data.rapid_submit_weight
+    if data.burst_request_weight is not None:
+        risk_engine.DEFAULT_WEIGHTS.burst_high = data.burst_request_weight
+    if data.queue_anomaly_weight is not None:
+        risk_engine.DEFAULT_WEIGHTS.abnormal_queue_attempts = data.queue_anomaly_weight
+    if data.bypass_attempt_weight is not None:
+        risk_engine.DEFAULT_WEIGHTS.bypass_attempts = data.bypass_attempt_weight
+    if data.session_anomaly_weight is not None:
+        risk_engine.DEFAULT_WEIGHTS.session_anomaly = data.session_anomaly_weight
+    if data.medium_threshold is not None:
+        risk_engine.DEFAULT_THRESHOLDS.low_cutoff = data.medium_threshold
+    if data.high_threshold is not None:
+        risk_engine.DEFAULT_THRESHOLDS.high_cutoff = data.high_threshold
+    return {
+        'message': 'Risk weights and thresholds updated successfully.',
+        'weights': _serialize_weights(),
+        'thresholds': _serialize_thresholds()
+    }

@@ -42,6 +42,9 @@ class Ticket(Base):
     redeemed_by_gate = Column(String, nullable=True)
     blockchain_tx = Column(String, nullable=True)
     blockchain_token_id = Column(Integer, nullable=True)
+    quai_status = Column(String, default='NOT_SYNCED')  # NOT_SYNCED, PENDING, CONFIRMED, FAILED
+    quai_tx_hash = Column(String, nullable=True)
+    quai_token_id = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class TicketOwnershipHistory(Base):
@@ -113,6 +116,21 @@ class QueueEntry(Base):
     session_id = Column(String, nullable=True)
     joined_at = Column(DateTime, default=datetime.utcnow)
 
+# Upgrade 2: Secure Event-Specific Queue Authorization
+class QueueAuthorization(Base):
+    __tablename__ = 'queue_authorizations'
+    id = Column(Integer, primary_key=True, index=True)
+    token = Column(String, unique=True, index=True)  # Cryptographically signed HMAC token
+    event_id = Column(Integer, ForeignKey('events.id'), index=True)
+    email = Column(String, index=True)
+    session_id = Column(String, default='')
+    max_quantity = Column(Integer, default=2)
+    status = Column(String, default='ACTIVE')  # ACTIVE, CONSUMED, EXPIRED, REVOKED
+    issued_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    consumed_at = Column(DateTime, nullable=True)
+    booking_tx_ref = Column(String, nullable=True)
+
 class AccessAttempt(Base):
     __tablename__ = 'access_attempts'
     id = Column(Integer, primary_key=True, index=True)
@@ -145,3 +163,49 @@ class SecurityLog(Base):
     severity = Column(String, default='WARNING')  # INFO, WARNING, CRITICAL
     details = Column(Text)
     timestamp = Column(DateTime, default=datetime.utcnow)
+
+# Upgrade 1: Behavioral Risk Assessment Records
+class RiskAssessment(Base):
+    __tablename__ = 'risk_assessments'
+    id = Column(Integer, primary_key=True, index=True)
+    event_id = Column(Integer, index=True)
+    identifier = Column(String, index=True)
+    session_id = Column(String, default='')
+    ip_address = Column(String, default='127.0.0.1')
+    risk_score = Column(Float, default=0.0)
+    risk_classification = Column(String, default='LOW')  # LOW, MEDIUM, HIGH
+    triggered_signals = Column(Text, default='[]')        # JSON list of signals
+    action_taken = Column(String, default='ALLOWED')      # ALLOWED, CHALLENGE_ISSUED, RESTRICTED
+    duration_ms = Column(Integer, default=0)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+
+# Quai Network Integration Models
+class QuaiTicketRecord(Base):
+    __tablename__ = 'quai_ticket_records'
+    id = Column(Integer, primary_key=True, index=True)
+    ticket_id = Column(Integer, ForeignKey('tickets.id'), unique=True, index=True)
+    event_id = Column(Integer, index=True)
+    ticket_hash = Column(String, unique=True, index=True)  # Keccak256/SHA256 privacy-preserving hash
+    quai_tx_hash = Column(String, index=True, nullable=True)
+    contract_address = Column(String, default='')
+    zone = Column(String, default='cyprus1')
+    status = Column(String, default='PENDING')  # PENDING, CONFIRMED, FAILED
+    on_chain_redeemed = Column(Boolean, default=False)
+    registered_at = Column(DateTime, default=datetime.utcnow)
+    confirmed_at = Column(DateTime, nullable=True)
+    error_message = Column(Text, nullable=True)
+
+class QuaiTransaction(Base):
+    __tablename__ = 'quai_transactions'
+    id = Column(Integer, primary_key=True, index=True)
+    tx_hash = Column(String, unique=True, index=True)
+    ticket_id = Column(Integer, nullable=True)
+    event_id = Column(Integer, nullable=True)
+    action = Column(String)  # REGISTER_TICKET, RESELL_TICKET, REDEEM_TICKET
+    status = Column(String, default='PENDING')  # PENDING, CONFIRMED, FAILED
+    block_number = Column(Integer, nullable=True)
+    retry_count = Column(Integer, default=0)
+    payload = Column(Text, default='')
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)

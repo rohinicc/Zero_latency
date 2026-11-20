@@ -15,6 +15,9 @@ export default function RestrictedAccessModal({
   const [securityStatus, setSecurityStatus] = useState('CHECKING'); // CHECKING, GRANTED, CHALLENGE_REQUIRED, RESTRICTED
   const [securityMsg, setSecurityMsg] = useState('Analyzing interaction timing and request behavioral signals...');
   const [riskScore, setRiskScore] = useState(0.0);
+  const [riskClassification, setRiskClassification] = useState('LOW');
+  const [triggeredSignals, setTriggeredSignals] = useState([]);
+  const [queueAuthToken, setQueueAuthToken] = useState(null);
   const [restrictionDetails, setRestrictionDetails] = useState(null);
   const [remainingLockout, setRemainingLockout] = useState(0);
 
@@ -80,6 +83,8 @@ export default function RestrictedAccessModal({
         })
       });
       const data = await res.json();
+      setRiskClassification(data.classification || 'LOW');
+      setTriggeredSignals(data.signals || []);
 
       if (data.status === 'RESTRICTED') {
         setSecurityStatus('RESTRICTED');
@@ -99,6 +104,9 @@ export default function RestrictedAccessModal({
         setSecurityStatus('GRANTED');
         setRiskScore(data.risk_score || 0.0);
         setSecurityMsg('Human presence and behavioral signals verified!');
+        if (data.queue_auth_token) {
+          setQueueAuthToken(data.queue_auth_token);
+        }
         
         // Next: check if queue is enabled
         if (event.queue_enabled) {
@@ -133,6 +141,9 @@ export default function RestrictedAccessModal({
 
       setSecurityStatus('GRANTED');
       setChallengeQuestion(null);
+      if (data.queue_auth_token) {
+        setQueueAuthToken(data.queue_auth_token);
+      }
       if (event.queue_enabled) {
         setStage('QUEUE');
         joinEventQueue();
@@ -166,9 +177,13 @@ export default function RestrictedAccessModal({
 
   async function handleAdmitFromQueue() {
     try {
-      await fetch(`/api/events/${event.id}/queue/admit?email=${encodeURIComponent(user.email)}`, {
+      const res = await fetch(`/api/events/${event.id}/queue/admit?email=${encodeURIComponent(user.email)}`, {
         method: 'POST'
       });
+      const data = await res.json();
+      if (data.queue_auth_token) {
+        setQueueAuthToken(data.queue_auth_token);
+      }
       setQueueAdmitted(true);
       setStage('BOOKING');
     } catch (err) {
@@ -206,13 +221,14 @@ export default function RestrictedAccessModal({
       setBookingError(`You can book between 1 and ${event.max_per_user} tickets`);
       return;
     }
-    // Launch Demo Payment Gateway
+    // Launch Demo Payment Gateway with cryptographic queue auth token
     onProceedToPayment({
       event,
       quantity,
       unitPrice: event.price,
       totalAmount: event.price * quantity,
-      user
+      user,
+      queueAuthToken
     });
   }
 
@@ -460,6 +476,16 @@ export default function RestrictedAccessModal({
           {stage === 'BOOKING' && (
             <div className="space-y-5">
               
+              {queueAuthToken && (
+                <div className="flex items-center gap-2 p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs">
+                  <ShieldCheck className="w-4 h-4 shrink-0 text-emerald-400" />
+                  <div className="truncate">
+                    <span className="font-semibold text-emerald-300">Queue Authorization Verified:</span>{' '}
+                    <span className="font-mono text-[11px] text-slate-300">Signed HMAC-SHA256 Token Active</span>
+                  </div>
+                </div>
+              )}
+
               <div className="p-4 rounded-2xl bg-slate-950/60 border border-slate-800 space-y-3">
                 <div className="flex items-center justify-between">
                   <span className="text-xs text-slate-400">Event</span>

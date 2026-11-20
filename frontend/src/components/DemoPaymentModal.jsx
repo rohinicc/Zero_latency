@@ -62,6 +62,7 @@ export default function DemoPaymentModal({
             name: paymentData.user.name,
             quantity: paymentData.quantity,
             payment_method: method,
+            queue_auth_token: paymentData.queueAuthToken || null,
             simulate_failure: simulateFailure
           })
         });

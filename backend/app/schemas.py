@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 # Event schemas
@@ -53,7 +53,7 @@ class EventOut(EventBase):
     class Config:
         from_attributes = True
 
-# Security & Bot protection schemas
+# Security & Behavioral Risk schemas
 class AccessCheckRequest(BaseModel):
     event_id: int
     email: str
@@ -65,7 +65,11 @@ class AccessCheckResponse(BaseModel):
     status: str  # GRANTED, CHALLENGE_REQUIRED, RESTRICTED
     reason: str
     risk_score: float
+    risk_classification: Optional[str] = "LOW"
+    triggered_signals: Optional[List[str]] = Field(default_factory=list)
+    action_taken: Optional[str] = "ALLOWED"
     restricted_until: Optional[str] = None
+    remaining_seconds: Optional[int] = None
     challenge_question: Optional[str] = None
     challenge_token: Optional[str] = None
 
@@ -74,6 +78,28 @@ class ChallengeVerifyRequest(BaseModel):
     email: str
     challenge_token: str
     solution: str
+
+class RiskAssessmentOut(BaseModel):
+    id: int
+    event_id: int
+    identifier: str
+    session_id: str
+    ip_address: str
+    risk_score: float
+    risk_classification: str
+    triggered_signals: List[str]
+    action_taken: str
+    duration_ms: int
+    timestamp: str
+
+class RiskWeightsConfig(BaseModel):
+    rapid_submission_sub300: Optional[float] = None
+    rapid_submission_sub800: Optional[float] = None
+    burst_high: Optional[float] = None
+    burst_medium: Optional[float] = None
+    abnormal_queue_attempts: Optional[float] = None
+    failed_queue_auth: Optional[float] = None
+    bypass_attempts: Optional[float] = None
 
 # Queue schemas
 class QueueJoinRequest(BaseModel):
@@ -90,6 +116,13 @@ class QueueStatusResponse(BaseModel):
     status: str
     estimated_wait_seconds: int
 
+class QueueAdmitResponse(BaseModel):
+    status: str
+    message: str
+    queue_auth_token: Optional[str] = None
+    expires_at: Optional[str] = None
+    max_quantity: Optional[int] = 2
+
 # Booking & Payment schemas
 class BookingRequest(BaseModel):
     event_id: int
@@ -99,6 +132,7 @@ class BookingRequest(BaseModel):
     payment_method: str = 'UPI'
     simulate_failure: bool = False
     access_token: Optional[str] = None
+    queue_auth_token: Optional[str] = Field(None, description="Cryptographically signed queue authorization token")
 
 class DemoPaymentProcessRequest(BaseModel):
     amount: float
@@ -151,3 +185,32 @@ class SimulateAttackRequest(BaseModel):
     event_id: int
     target_email: str
     burst_count: int = 55
+
+class RiskWeightsConfig(BaseModel):
+    rapid_submit_weight: Optional[float] = None
+    burst_request_weight: Optional[float] = None
+    queue_anomaly_weight: Optional[float] = None
+    bypass_attempt_weight: Optional[float] = None
+    session_anomaly_weight: Optional[float] = None
+    medium_threshold: Optional[float] = None
+    high_threshold: Optional[float] = None
+
+# Quai Network Integration Schemas
+class QuaiSyncRequest(BaseModel):
+    ticket_id: int
+    buyer_address: Optional[str] = "0x00112233445566778899aabbccddeeff00112233"
+    contract_address: Optional[str] = None
+
+class QuaiVerificationResponse(BaseModel):
+    exists: bool
+    verified: bool
+    status: str
+    ticket_id: Optional[int] = None
+    event_id: Optional[int] = None
+    ticket_hash: Optional[str] = None
+    quai_tx_hash: Optional[str] = None
+    contract_address: Optional[str] = None
+    zone: Optional[str] = "cyprus1"
+    on_chain_redeemed: Optional[bool] = False
+    confirmed_at: Optional[str] = None
+    message: str
