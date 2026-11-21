@@ -66,12 +66,8 @@ FairPass delivers an end-to-end fair ticketing lifecycle centered on four founda
 ## ✨ Key Features
 
 ### 🛡️ 1. Multi-Signal Behavioral Risk Engine
-- **Velocity Detection**: Identifies sub-human submission speeds (< 200ms) and flags them as `MEDIUM` risk.
+- **Velocity Detection**: Identifies sub-human submission speeds (< 300ms) and flags them as `MEDIUM` risk.
 - **Burst Rate Limiting**: Catches rapid-fire access hits (50+ requests in seconds) and enforces an automatic 5-minute cooldown.
-- **Three-Tier Classification**:
-  - 🟢 **LOW (< 0.40)**: Immediate access granted.
-  - 🟡 **MEDIUM (0.40 – 0.74)**: Interactive math/puzzle verification challenge required.
-  - 🔴 **HIGH (≥ 0.75)**: 5-minute temporary lockout with a real-time countdown timer.
 - **Admin Control**: Live risk score telemetry and configurable weights via `/api/admin/security/risk-weights`.
 
 ### 🔐 2. Cryptographic Queue Authorization
